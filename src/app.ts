@@ -148,16 +148,5 @@ function onListening() {
 	console.log("App is listening from port: " + port);
 }
 
-// const accountSid = process.env.TWILIO_ACCOUNT_SID;
-// const authToken = process.env.TWILIO_AUTH_TOKEN;
-// const client = require("twilio")(accountSid, authToken);
-
-// client.messages
-// 	.create({
-// 		body: "Hello from Twilio",
-// 		from: process.env.TWILIO_PHONE_NUMBER,
-// 		to: "+2347064846229",
-// 	})
-// .then((message) => console.log(message.sid));
-
-import "./util";
+import { Util } from "./util";
+new Util();
