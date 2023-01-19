@@ -17,4 +17,4 @@ jobs:
       - name: Install dependencies
         run: yarn install
       - name: Run index.js
-        run: node index.js
+        run: npm run dev
