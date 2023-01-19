@@ -1,152 +1,155 @@
-//To  make sure any property i add to response or request would be recognized
-declare module "express-serve-static-core" {
-	interface Response {
-		statusJson: (statusCode: number, data: {}) => void;
-	}
-}
-
-import { Express } from "express-serve-static-core";
-import express, {
-	Request,
-	Response,
-	NextFunction,
-	ErrorRequestHandler,
-} from "express";
-import createError from "http-errors";
-import path from "path";
-import cookieParser from "cookie-parser";
-import logger from "morgan";
 import dotenv from "dotenv";
-import * as http from "http";
-import cors from "cors";
+import { Client, APIResponseError } from "@notionhq/client";
+import twilio, { Twilio } from "twilio";
+import RestException from "twilio/lib/base/RestException";
+import { DetailsInterface } from "./index.interface";
 
 dotenv.config();
+export class Util {
+	accountSid: string;
+	authToken: string;
+	myPhoneNumber: string;
+	notionClient: Client;
+	twilioClient: Twilio;
 
-export const app: Express = express();
+	constructor() {
+		if (!process.env.TWILIO_ACCOUNT_SID) {
+			throw new Error("No TWILIO_ACCOUNT_SID in .env");
+		}
+		if (!process.env.TWILIO_AUTH_TOKEN) {
+			throw new Error("No TWILIO_AUTH_TOKEN in .env");
+		}
+		if (!process.env.TWILIO_PHONE_NUMBER) {
+			throw new Error("No TWILIO_PHONE_NUMBER in .env");
+		}
 
-/**
- * Create HTTP server.
- */
-const server: http.Server = http.createServer(app);
+		this.accountSid = process.env.TWILIO_ACCOUNT_SID;
+		this.authToken = process.env.TWILIO_AUTH_TOKEN;
+		this.myPhoneNumber = process.env.TWILIO_PHONE_NUMBER;
 
-// view engine setup
-app.set("views", path.join(__dirname, "views"));
-app.set("view engine", "ejs");
+		this.notionClient = new Client({
+			auth: process.env.NOTION_AUTH_TOKEN,
+		});
+		this.twilioClient = twilio(this.accountSid, this.authToken);
+	}
 
-app.use(logger("dev"));
-app.use(express.json());
-app.use(express.urlencoded({ extended: false }));
-app.use(cookieParser());
-app.use(cors());
-
-app.use(express.static(path.join(__dirname, "public")));
-
-app.use((req: Request, res: Response, next: NextFunction) => {
-	res.statusJson = (statusCode: number, data: {}): void => {
-		let obj = {
-			...data,
-			statusCode: statusCode,
-		};
-		res.status(statusCode).json(obj);
-		return;
+	getPeopleToReachoutTo = async () => {
+		const response = await this.notionClient.databases.query({
+			database_id: process.env.NOTION_DATABASE_ID,
+			filter: {
+				property: "Should Reach Out?",
+				checkbox: {
+					equals: true,
+				},
+			},
+		});
+		return response;
 	};
-	next();
-});
 
-// catch 404 and forward to error handler
-app.use((req: Request, res: Response, next: NextFunction) => {
-	next(createError(404));
-});
+	extractContactDetails = async (filteredContactsArray) => {
+		let details: DetailsInterface[];
+		if (filteredContactsArray) {
+			const neededPageAndPropertiesIds = filteredContactsArray.map(
+				(contactObject) => ({
+					pageId: contactObject.id,
+					phoneNumberPropertyId: contactObject.properties["Phone Number"].id,
+					namePropertyId: contactObject.properties["Name"].id,
+					reachOutByPropertyId: contactObject.properties["Reach out by"].id,
+				})
+			);
 
-// error  handler
-app.use((err: any, req: Request, res: Response, next: NextFunction) => {
-	// set locals, only providing error in development
-	res.locals.message = err.message;
-	res.locals.error = req.app.get("env") === "development" ? err : {};
+			const promises = neededPageAndPropertiesIds.map(
+				async (pageAndPropertyId) => {
+					const {
+						pageId,
+						phoneNumberPropertyId,
+						namePropertyId,
+						reachOutByPropertyId,
+					} = pageAndPropertyId;
 
-	// render the error page
-	res.status(err.status || 500);
-	res.render("error");
-});
+					const phoneNumberProperty =
+						await this.notionClient.pages.properties.retrieve({
+							page_id: pageId,
+							property_id: phoneNumberPropertyId,
+						});
 
-/**
- * Module dependencies.
- */
+					const reachOutByProperty =
+						await this.notionClient.pages.properties.retrieve({
+							page_id: pageId,
+							property_id: reachOutByPropertyId,
+						});
 
-const debug = require("debug")("chapidyzz:server");
+					const nameProperty =
+						await this.notionClient.pages.properties.retrieve({
+							page_id: pageId,
+							property_id: namePropertyId,
+						});
+					return {
+						phoneNumber: phoneNumberProperty[phoneNumberProperty.type],
+						reachOutBy: reachOutByProperty[reachOutByProperty.type].name,
+						name: nameProperty["results"][0]?.title.text.content,
+					};
+				}
+			);
 
-/**
- * Get port from environment and store in Express.
- */
-const port = normalizePort(process.env.PORT || "3000");
+			details = await Promise.all<DetailsInterface>(promises);
+		} else {
+			throw new Error("You did not provide any list to extract data from.");
+		}
 
-app.set("port", port);
+		return details;
+	};
 
-/**
- * Listen on provided port, on all network interfaces.
- */
+	sendSMS = async (phoneNumber: string, messageBody: string) => {
+		return await this.twilioClient.messages.create({
+			body: messageBody,
+			from: this.myPhoneNumber,
+			to: phoneNumber,
+		});
+	};
 
-server.listen(port);
-server.on("error", onError);
-server.on("listening", onListening);
+	run = async () => {
+		try {
+			const peopleToReachOutTo = await this.getPeopleToReachoutTo();
+			const details = await this.extractContactDetails(
+				peopleToReachOutTo.results
+			);
+			for (let detail of details) {
+				const { name, reachOutBy, phoneNumber } = detail;
+				let response;
 
-/**
- * Normalize a port into a number, string, or false.
- */
-
-function normalizePort(val: any) {
-	const port = parseInt(val, 10);
-
-	if (isNaN(port)) {
-		return val;
-	}
-
-	if (port >= 0) {
-		return port;
-	}
-
-	return false;
+				if (reachOutBy === "text") {
+					const checkInMessage = `Hi ${name}! How have you been? It has been a while and I wanted to say hi. Let's catch up soon. Have a great day!`;
+					response = await this.sendSMS(phoneNumber, checkInMessage);
+				} else {
+					const reminderMessage = `It's been 3 months since you spoke with ${name}. It's time to reach out! Call ${phoneNumber} to say hi to ${name}`;
+					response = await this.sendSMS(
+						process.env.PHONE_NUMBER_FOR_REMINDERS,
+						reminderMessage
+					);
+				}
+			}
+			console.log("******************");
+			console.log(peopleToReachOutTo);
+			console.log(details);
+			console.log("*****************");
+		} catch (error) {
+			if (error instanceof APIResponseError) {
+				console.error(
+					"Unable to fetch items from database. An error occured from the API client."
+				);
+				console.error("Error code: " + error.code);
+				console.error(error.message);
+			} else if (error instanceof RestException) {
+				console.error(
+					"Unable to send reminder or message. The following error occured: "
+				);
+				console.error(error.message);
+			} else {
+				console.error(error.message);
+			}
+		}
+	};
 }
 
-/**
- * Event listener for HTTP server "error" event.
- */
-
-function onError(error: any) {
-	if (error.syscall !== "listen") {
-		throw error;
-	}
-
-	var bind = typeof port === "string" ? "Pipe " + port : "Port " + port;
-
-	// handle specific listen errors with friendly messages
-	switch (error.code) {
-		case "EACCES":
-			console.error(bind + " requires elevated privileges");
-			process.exit(1);
-			break;
-		case "EADDRINUSE":
-			console.error(bind + " is already in use");
-			process.exit(1);
-			break;
-		default:
-			throw error;
-	}
-}
-
-/**
- * Event listener for HTTP server "listening" event.
- */
-
-function onListening() {
-	const addr = server.address();
-	const bind =
-		typeof addr === "string" ? "pipe " + addr : addr ? "port " + addr.port : "";
-	debug("Listening on " + bind);
-	console.log("=============");
-	console.log("=============");
-	console.log("App is listening from port: " + port);
-}
-
-import { Util } from "./util";
-new Util();
+new Util().run();
