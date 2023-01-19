@@ -6,6 +6,9 @@
     "dev:build": "tsc -w",
     "dev:run": "nodemon build/app.js",
     "dev": "concurrently -c auto npm:dev:*",
+    "start:build": "tsc",
+    "start:run": "node build/app.js",
+    "start": "concurrently -c auto npm:start:*",
     "postinstall": "tsc",
     "test": "mocha --watch -r ts-node/register src/test/index.spec.ts",
     "test:rec": "nodemon --exec npm run test"
